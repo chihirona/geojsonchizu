@@ -13,6 +13,11 @@ h1 { font-size: 22px; margin: 0 0 8px; }
 .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
 button, .pick { font: inherit; padding: 6px 12px; border: 1px solid #9cbab7; border-radius: 6px; background: white; color: inherit; cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
+#filters { margin-top: 10px; }
+#filters summary { cursor: pointer; font-weight: 600; }
+#options { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 8px 0; }
+#options label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid #0004; }
 #status { margin: 8px 0 0; }
 #map { min-height: 320px; background: #e0efee; }
 </style>
@@ -21,11 +26,17 @@ button:disabled { opacity: .5; cursor: default; }
 <header>
 <h1>東京都の学校マップ</h1>
 <div class="controls">
-<button id="extent" type="button" disabled>全地点を表示</button>
+<button id="extent" type="button" disabled>表示中の地点を見渡す</button>
 <button id="mainland" type="button">東京の市街地へ</button>
 <button id="choose" type="button">GeoJSONを選択</button>
 <input id="file" type="file" accept=".geojson,.json" hidden>
 </div>
+<details id="filters" hidden>
+<summary>学校種別で絞り込む</summary>
+<div id="options" aria-label="表示する学校種別"></div>
+<button id="select-all" type="button">すべて選択</button>
+<button id="select-none" type="button">すべて解除</button>
+</details>
 <p id="status" role="status">地図を読み込み中…</p>
 </header>
 <main id="map" aria-label="学校の位置を表示する地図"></main>
@@ -37,12 +48,26 @@ const fileInput = document.querySelector('#file');
 const extent = document.querySelector('#extent');
 const mainland = document.querySelector('#mainland');
 const choose = document.querySelector('#choose');
+// 国土数値情報（学校）の学校分類コード表と表示色。
 const types = {
-  16001: '小学校', 16002: '中学校', 16003: '中等教育学校', 16004: '高等学校',
-  16005: '高等専門学校', 16006: '短期大学', 16007: '大学', 16011: '幼稚園',
-  16012: '特別支援学校', 16013: '幼保連携型認定こども園', 16014: '義務教育学校',
-  16015: '各種学校', 16016: '専修学校'
+  16001: ['小学校', '#0064b4'],
+  16002: ['中学校', '#008454'],
+  16003: ['中等教育学校', '#805200'],
+  16004: ['高等学校', '#b52837'],
+  16005: ['高等専門学校', '#30336c'],
+  16006: ['短期大学', '#a34b00'],
+  16007: ['大学', '#7036a4'],
+  16011: ['幼稚園', '#ce6500'],
+  16012: ['特別支援学校', '#405965'],
+  16013: ['幼保連携型認定こども園', '#c52e80'],
+  16014: ['義務教育学校', '#637900'],
+  16015: ['各種学校', '#825846'],
+  16016: ['専修学校', '#007e8a']
 };
+const category = code => Object.hasOwn(types, code)
+  ? types[code]
+  : [code ? `未定義（${code}）` : '種別コードなし', '#555555'];
+const typeCode = feature => String(feature.properties?.P29_003 ?? '');
 if (typeof L === 'undefined') {
   status.textContent = '地図ライブラリを読み込めません。インターネット接続を確認して再読み込みしてください。';
   choose.disabled = mainland.disabled = true;
@@ -57,6 +82,11 @@ if (typeof L === 'undefined') {
   }).addTo(map);
   map.attributionControl.addAttribution('<a href="https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-P29-2023.html">国土数値情報（学校）</a>');
 
+  const filters = document.querySelector('#filters');
+  const options = document.querySelector('#options');
+  const checkboxes = new Map();
+  let allFeatures = [];
+  let skipped = 0;
   let points;
   let loadVersion = 0;
   extent.addEventListener('click', () => map.fitBounds(points.getBounds(), { padding: [20, 20], maxZoom: 16 }));
@@ -68,7 +98,7 @@ if (typeof L === 'undefined') {
     const title = document.createElement('strong');
     title.textContent = p.P29_004 || '名称未登録';
     box.append(title);
-    for (const value of [p.P29_009, types[p.P29_003], p.P29_005]) {
+    for (const value of [p.P29_009, category(p.P29_003)[0], p.P29_005]) {
       if (!value) continue;
       const line = document.createElement('div');
       line.textContent = value;
@@ -88,20 +118,55 @@ if (typeof L === 'undefined') {
       return Number.isFinite(lng) && Number.isFinite(lat) && Math.abs(lng) <= 180 && Math.abs(lat) <= 90;
     });
     if (!features.length) throw new Error('表示できる地点がありません。');
+    allFeatures = features;
+    skipped = data.features.length - features.length;
+    const previous = new Map([...checkboxes].map(([code, input]) => [code, input.checked]));
+    checkboxes.clear();
+    options.replaceChildren();
+    const codes = [...new Set(features.map(typeCode))].sort();
+    for (const code of codes) {
+      const [name, color] = category(code);
+      const label = document.createElement('label');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = previous.get(code) ?? true;
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.backgroundColor = color;
+      swatch.setAttribute('aria-hidden', 'true');
+      label.append(input, swatch, code ? `${name} [${code}]` : name);
+      options.append(label);
+      checkboxes.set(code, input);
+    }
+    filters.hidden = false;
+    renderPoints();
+  }
+
+  function renderPoints() {
+    const features = allFeatures.filter(feature => checkboxes.get(typeCode(feature)).checked);
     const layer = L.geoJSON({ type: 'FeatureCollection', features }, {
       pointToLayer: (feature, latlng) => L.circleMarker(latlng, {
-        radius: 5, color: '#fff', weight: 1, fillColor: '#007c75', fillOpacity: .85
+        radius: 5, color: '#fff', weight: 1,
+        fillColor: category(typeCode(feature))[1], fillOpacity: .9
       }),
       onEachFeature: (feature, marker) => marker.bindPopup(() => popup(feature.properties))
     });
     if (points) points.remove();
     points = layer.addTo(map);
-    extent.disabled = false;
-    status.textContent = `${features.length.toLocaleString('ja-JP')} 地点を読み込みました。点をクリックすると施設情報が表示されます。`;
-    if (features.length < data.features.length) {
-      status.textContent += ` 表示対象外: ${data.features.length - features.length} 件。`;
-    }
+    extent.disabled = !features.length;
+    status.textContent = `表示中 ${features.length.toLocaleString('ja-JP')} / ${allFeatures.length.toLocaleString('ja-JP')} 地点。`;
+    status.textContent += features.length ? ' 点をクリックすると施設情報が表示されます。' : ' 表示する学校種別を選択してください。';
+    if (skipped) status.textContent += ` 表示対象外: ${skipped} 件。`;
   }
+
+  function selectAll(checked) {
+    for (const input of checkboxes.values()) input.checked = checked;
+    renderPoints();
+  }
+
+  options.addEventListener('change', renderPoints);
+  document.querySelector('#select-all').addEventListener('click', () => selectAll(true));
+  document.querySelector('#select-none').addEventListener('click', () => selectAll(false));
 
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files[0];
